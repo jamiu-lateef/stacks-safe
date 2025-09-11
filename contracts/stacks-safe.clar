@@ -184,3 +184,102 @@
     false
   )
 )
+
+;; CORE PROTOCOL FUNCTIONS
+
+(define-public (initialize-protocol)
+  ;; Bootstrap StacksSafe protocol for operation
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (not (var-get protocol-active)) ERR-ALREADY-INITIALIZED)
+
+    ;; Initialize default price feeds
+    (map-set price-oracle { asset: "BTC" } {
+      price-usd: u5000000,
+      last-updated: stacks-block-height,
+      is-active: true,
+    })
+    (map-set price-oracle { asset: "STX" } {
+      price-usd: u200000,
+      last-updated: stacks-block-height,
+      is-active: true,
+    })
+
+    (var-set protocol-active true)
+    (ok "StacksSafe protocol initialized successfully")
+  )
+)
+
+(define-public (create-loan
+    (collateral-amount uint)
+    (borrow-amount uint)
+    (asset (string-ascii 3))
+  )
+  ;; Originate new Bitcoin-collateralized loan
+  (let (
+      (loan-id (+ (var-get loan-counter) u1))
+      (price-data (unwrap! (map-get? price-oracle { asset: asset }) ERR-INVALID-PRICE-FEED))
+      (collateral-value (* collateral-amount (get price-usd price-data)))
+      (required-collateral (* borrow-amount (var-get min-collateral-ratio)))
+    )
+    (begin
+      ;; Protocol validation checks
+      (asserts! (var-get protocol-active) ERR-NOT-INITIALIZED)
+      (asserts! (not (var-get emergency-pause)) ERR-UNAUTHORIZED)
+      (asserts! (validate-asset asset) ERR-UNSUPPORTED-ASSET)
+      (asserts! (> collateral-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (> borrow-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (>= collateral-value required-collateral)
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+
+      ;; Create loan entry
+      (map-set loan-registry { loan-id: loan-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral-amount,
+        borrowed-amount: borrow-amount,
+        interest-rate: BASE-INTEREST-RATE,
+        creation-block: stacks-block-height,
+        last-update-block: stacks-block-height,
+        status: "active",
+      })
+
+      ;; Update user portfolio
+      (match (map-get? user-portfolio { user: tx-sender })
+        existing-portfolio (map-set user-portfolio { user: tx-sender } { loan-ids: (unwrap!
+          (as-max-len? (append (get loan-ids existing-portfolio) loan-id) u20)
+          ERR-INVALID-AMOUNT
+        ) }
+        )
+        (map-set user-portfolio { user: tx-sender } { loan-ids: (list loan-id) })
+      )
+
+      ;; Update protocol metrics
+      (var-set total-value-locked
+        (+ (var-get total-value-locked) collateral-amount)
+      )
+      (var-set loan-counter loan-id)
+
+      (ok loan-id)
+    )
+  )
+)
+
+(define-public (repay-loan
+    (loan-id uint)
+    (repayment-amount uint)
+  )
+  ;; Process loan repayment with interest calculation
+  (let (
+      (loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+      (blocks-elapsed (- stacks-block-height (get last-update-block loan-data)))
+      (accrued-interest (calculate-accrued-interest (get borrowed-amount loan-data)
+        (get interest-rate loan-data) blocks-elapsed
+      ))
+      (total-owed (+ (get borrowed-amount loan-data) accrued-interest))
+    )
+    (begin
+      ;; Validation checks
+      (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-INACTIVE)
+      (asserts! (is-eq (get borrower loan-data) tx-sender) ERR-UNAUTHORIZED)
+      (asserts! (>= repayment-amount total-owed) ERR-INVALID-AMOUNT)
