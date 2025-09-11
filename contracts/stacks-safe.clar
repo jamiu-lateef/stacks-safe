@@ -379,3 +379,75 @@
     (ok "Price feed updated")
   )
 )
+
+(define-public (emergency-pause-protocol (pause bool))
+  ;; Emergency protocol pause mechanism
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set emergency-pause pause)
+    (ok (if pause
+      "Protocol paused"
+      "Protocol resumed"
+    ))
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+(define-read-only (get-loan-info (loan-id uint))
+  ;; Retrieve comprehensive loan details and current status
+  (map-get? loan-registry { loan-id: loan-id })
+)
+
+(define-read-only (get-user-portfolio (user principal))
+  ;; Get all loans associated with user account
+  (map-get? user-portfolio { user: user })
+)
+
+(define-read-only (get-protocol-metrics)
+  ;; Return real-time protocol statistics and health indicators
+  {
+    total-value-locked: (var-get total-value-locked),
+    active-loans: (var-get loan-counter),
+    min-collateral-ratio: (var-get min-collateral-ratio),
+    liquidation-threshold: (var-get liquidation-threshold),
+    protocol-active: (var-get protocol-active),
+    emergency-pause: (var-get emergency-pause),
+  }
+)
+
+(define-read-only (get-asset-price (asset (string-ascii 4)))
+  ;; Get current price feed for supported asset
+  (map-get? price-oracle { asset: asset })
+)
+
+(define-read-only (get-loan-health (loan-id uint))
+  ;; Calculate current health metrics for specific loan
+  (match (map-get? loan-registry { loan-id: loan-id })
+    loan-data (match (map-get? price-oracle { asset: "BTC" })
+      price-data (let (
+          (current-ratio (compute-collateral-ratio (get collateral-amount loan-data)
+            (get borrowed-amount loan-data) (get price-usd price-data)
+          ))
+          (blocks-elapsed (- stacks-block-height (get last-update-block loan-data)))
+          (accrued-interest (calculate-accrued-interest (get borrowed-amount loan-data)
+            (get interest-rate loan-data) blocks-elapsed
+          ))
+        )
+        (some {
+          collateral-ratio: current-ratio,
+          is-healthy: (> current-ratio (var-get liquidation-threshold)),
+          accrued-interest: accrued-interest,
+          total-debt: (+ (get borrowed-amount loan-data) accrued-interest),
+        })
+      )
+      none
+    )
+    none
+  )
+)
+
+(define-read-only (get-supported-assets)
+  ;; List all assets supported as collateral
+  SUPPORTED-ASSETS
+)
