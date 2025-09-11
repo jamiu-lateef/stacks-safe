@@ -283,3 +283,99 @@
       (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-INACTIVE)
       (asserts! (is-eq (get borrower loan-data) tx-sender) ERR-UNAUTHORIZED)
       (asserts! (>= repayment-amount total-owed) ERR-INVALID-AMOUNT)
+
+      ;; Close loan and release collateral
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data {
+          status: "repaid",
+          last-update-block: stacks-block-height,
+        })
+      )
+
+      ;; Update protocol state
+      (var-set total-value-locked
+        (- (var-get total-value-locked) (get collateral-amount loan-data))
+      )
+
+      ;; Remove from user portfolio
+      (remove-loan-from-portfolio tx-sender loan-id)
+
+      (ok {
+        repaid-amount: total-owed,
+        interest-paid: accrued-interest,
+        collateral-released: (get collateral-amount loan-data),
+      })
+    )
+  )
+)
+
+(define-public (liquidate-loan (loan-id uint))
+  ;; Execute liquidation of undercollateralized position
+  (let ((loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND)))
+    (begin
+      (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-INACTIVE)
+      (asserts! (is-loan-underwater loan-id) ERR-LIQUIDATION-FAILED)
+
+      ;; Mark loan as liquidated
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data {
+          status: "liquidated",
+          last-update-block: stacks-block-height,
+        })
+      )
+
+      ;; Update protocol metrics
+      (var-set total-value-locked
+        (- (var-get total-value-locked) (get collateral-amount loan-data))
+      )
+
+      ;; Remove from borrower's portfolio
+      (remove-loan-from-portfolio (get borrower loan-data) loan-id)
+
+      (ok "Loan liquidated successfully")
+    )
+  )
+)
+
+;; GOVERNANCE & ADMINISTRATION
+
+(define-public (update-collateral-requirement (new-ratio uint))
+  ;; Adjust minimum collateralization ratio for risk management
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= new-ratio u110) ERR-INVALID-AMOUNT)
+    (asserts! (<= new-ratio u300) ERR-INVALID-AMOUNT)
+    (var-set min-collateral-ratio new-ratio)
+    (ok "Collateral ratio updated")
+  )
+)
+
+(define-public (update-liquidation-threshold (new-threshold uint))
+  ;; Modify liquidation trigger threshold
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= new-threshold u105) ERR-INVALID-AMOUNT)
+    (asserts! (< new-threshold (var-get min-collateral-ratio)) ERR-INVALID-AMOUNT)
+    (var-set liquidation-threshold new-threshold)
+    (ok "Liquidation threshold updated")
+  )
+)
+
+(define-public (update-price-feed
+    (asset (string-ascii 3))
+    (new-price uint)
+  )
+  ;; Update oracle price feed with validated market data
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (validate-asset asset) ERR-UNSUPPORTED-ASSET)
+    (asserts! (> new-price u0) ERR-INVALID-PRICE-FEED)
+
+    (map-set price-oracle { asset: asset } {
+      price-usd: new-price,
+      last-updated: stacks-block-height,
+      is-active: true,
+    })
+    (ok "Price feed updated")
+  )
+)
