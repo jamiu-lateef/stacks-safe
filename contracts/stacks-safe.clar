@@ -93,3 +93,94 @@
     is-active: bool,
   }
 )
+
+;; INTERNAL UTILITY FUNCTIONS
+
+(define-private (compute-collateral-ratio
+    (collateral uint)
+    (borrowed uint)
+    (asset-price uint)
+  )
+  ;; Calculate current collateralization ratio for risk assessment
+  (let ((collateral-value (* collateral asset-price)))
+    (if (is-eq borrowed u0)
+      u0
+      (* (/ collateral-value borrowed) u100)
+    )
+  )
+)
+
+(define-private (calculate-accrued-interest
+    (principal uint)
+    (rate uint)
+    (blocks-elapsed uint)
+  )
+  ;; Compute compound interest based on block progression
+  (let ((daily-rate (/ rate u365)))
+    (/ (* principal daily-rate blocks-elapsed) u10000)
+  )
+)
+
+(define-private (is-loan-underwater (loan-id uint))
+  ;; Determine if loan requires liquidation
+  (match (map-get? loan-registry { loan-id: loan-id })
+    loan-data (match (map-get? price-oracle { asset: "BTC" })
+      price-data (let ((current-ratio (compute-collateral-ratio (get collateral-amount loan-data)
+          (get borrowed-amount loan-data) (get price-usd price-data)
+        )))
+        (<= current-ratio (var-get liquidation-threshold))
+      )
+      false
+    )
+    false
+  )
+)
+
+(define-private (validate-asset (asset (string-ascii 3)))
+  ;; Verify asset is supported by protocol
+  (is-some (index-of SUPPORTED-ASSETS asset))
+)
+
+(define-private (is-valid-loan-id (loan-id uint))
+  ;; Validate loan ID within acceptable bounds
+  (and (> loan-id u0) (<= loan-id (var-get loan-counter)))
+)
+
+;; Global variable to store the target loan ID for filtering
+(define-data-var target-loan-id uint u0)
+
+(define-private (remove-if-equal
+    (loan-id uint)
+    (acc (list 20 uint))
+  )
+  ;; Helper for fold operation to filter out target ID
+  (if (is-eq loan-id (var-get target-loan-id))
+    acc
+    (unwrap-panic (as-max-len? (append acc loan-id) u20))
+  )
+)
+
+(define-private (filter-out-loan-id
+    (loan-list (list 20 uint))
+    (target-id uint)
+  )
+  ;; Helper function to remove a specific loan ID from a list
+  (begin
+    (var-set target-loan-id target-id)
+    (fold remove-if-equal loan-list (list))
+  )
+)
+
+(define-private (remove-loan-from-portfolio
+    (user principal)
+    (loan-id uint)
+  )
+  ;; Remove completed loan from user's active portfolio
+  (match (map-get? user-portfolio { user: user })
+    portfolio (begin
+      (map-set user-portfolio { user: user } { loan-ids: (filter-out-loan-id (get loan-ids portfolio) loan-id) })
+      true
+    )
+    false
+  )
+)
